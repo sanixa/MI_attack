@@ -25,7 +25,7 @@ from sklearn import manifold
 import torchvision.models as models
 
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,5'
 dataPath = './data/'
 
 
@@ -263,7 +263,7 @@ def main():
     print('--------------load model-----------------------')
     data_source=(targetTrain, targetTrainLabel, targetTest, targetTestLabel)
     #model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Target', Target_dataset, 'resnet50', args.seed, args.nm, 64, 30, 'Adam', 9e-5, 'CrossEntropyLoss'  ##nondp
-    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Target', Target_dataset, 'ResNet18v2_cifar10', args.seed, args.nm, 64, 30, 'Adam', 5e-4, 'CrossEntropyLoss' ##dp
+    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Target', Target_dataset, 'resnet50', args.seed, args.nm, 64, 5, 'Adam', 6e-6, 'CrossEntropyLoss' ##dp
     
     train_param = (dataset, True, data_source, True, model_name, model_type, 'cnn', (3,32,32), args.seed, args.nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
     logger.info('hyperparameter')
@@ -280,10 +280,11 @@ def main():
             target_model.load_state_dict(torch.load("model/target_dataset_mnist_ep_-1_nm_-1_epoch_30_param_0_dataset_custom_1_model_type_cnn.pt"))
         elif Target_dataset == 'cifar_10':
             target_model = model.resnet50(args.param).to(device)
-            target_model.load_state_dict(torch.load("model/Target_dataset_cifar_10_ep_-1_nm_-1_epoch_30_param_0_dataset_custom_True_model_type_cnn_1618455784.9627132_92.59_0.7561/model.pt"))
+            target_model.load_state_dict(torch.load("model/Target_dataset_cifar_10_ep_-1_nm_-1_epoch_150_param_0_dataset_custom_True_model_type_cnn_1618557344.0328155_99.29_0.6997/model_0.3.pt"))
 
     data_source=(shadowTrain, shadowTrainLabel, shadowTest, shadowTestLabel)
-    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Shadow', Shadow_dataset, 'resnet101', args.seed, args.nm, 64, 30, 'Adam', 6e-6, 'CrossEntropyLoss'
+    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Shadow', Shadow_dataset, 'resnet101', args.seed, args.nm, 64, 5, 'Adam', 6e-6, 'CrossEntropyLoss'
+    #model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Shadow', Shadow_dataset, 'ResNet18v2_cifar10', args.seed, args.nm, 64, 50, 'Adam', 3e-4, 'CrossEntropyLoss'
     
     train_param = (dataset, True, data_source, True, model_name, model_type, 'cnn', (3,32,32), seed, nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
     logger.info('hyperparameter')
@@ -301,9 +302,9 @@ def main():
             shadow_model.load_state_dict(torch.load("model/shadow_dataset_mnist_ep_-1_nm_-1_epoch_5_param_0_dataset_custom_1_model_type_cnn_0.5.pt"))
         elif Shadow_dataset == 'cifar_10':
             shadow_model = model.resnet101(args.param).to(device)
-            shadow_model.load_state_dict(torch.load("model/Shadow_dataset_cifar_10_ep_-1_nm_-1_epoch_1_param_0_dataset_custom_True_model_type_cnn_1618543150.9062595_26.5_0.2422/model.pt"))
+            shadow_model.load_state_dict(torch.load("model/Shadow_dataset_cifar_10_ep_-1_nm_-1_epoch_150_param_0_dataset_custom_True_model_type_cnn_1618560379.3184357_99.55_0.6964/model_0.3.pt"))
     logger.info('train/load model end')
-    
+
     train_kwargs = {'batch_size': 50}
     test_kwargs = {'batch_size': 50}
     if use_cuda:
@@ -472,7 +473,7 @@ def main():
 
     attack.yeom_membership_attack(shadow_per_instance_loss, shadow_attack_y, avg_train_loss, logger=logger)
     data_source=(shadow_attack_x, shadow_attack_y.astype('long').reshape(-1), target_attack_x, target_attack_y.astype('long').reshape(-1))
-    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'attack', Shadow_dataset, 'softmax_model', args.seed, args.nm, 16, 30, 'Adam', 5e-5, 'BCELoss'
+    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'attack', Shadow_dataset, 'softmax_model', args.seed, args.nm, 64, 15, 'Adam', 3e-5, 'BCELoss'
     
     train_param = (dataset, True, data_source, True, model_name, model_type, 'softmax', None, seed, nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
     logger.info('---------------------hyperparameter-----------------------')

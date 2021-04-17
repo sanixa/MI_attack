@@ -25,7 +25,7 @@ from torch.optim import *
 from torch.nn import *
 import torchvision.models as models
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '2,3,5'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,5'
 
 
 

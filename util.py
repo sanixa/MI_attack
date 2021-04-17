@@ -2,10 +2,10 @@ import logging
 import torch
 from torch.utils.data.dataset import Dataset
 from torchvision import datasets, transforms
-import copy
+import copy,os
 import numpy as np
 
-
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,5'
 
 def get_logger(filename, verbosity=1, name=None):
     level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
