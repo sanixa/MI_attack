@@ -11,6 +11,7 @@ from sklearn.metrics import confusion_matrix, roc_curve, classification_report, 
 import scipy.stats as stats
 import os
 from torch.utils.data.sampler import SubsetRandomSampler 
+from shutil import copyfile
 
 import trainNN
 
@@ -57,7 +58,7 @@ def yeom_membership_attack(per_instance_loss, attack_y, train_loss, logger):
 
 
 
-def shokri_membership_inference_one_shadow_model(train_param):
+def shokri_membership_inference_one_shadow_model(train_param, log_path):
     print('--------------train shokri attack model-----------------------')
     '''
     ##train classifier for each class 
@@ -91,9 +92,10 @@ def shokri_membership_inference_one_shadow_model(train_param):
     prety_print_result(total_testLabel, total_pred_Label)
     print(roc_auc_score(total_testLabel, total_pred_Label))
     '''
-    model = trainNN.train(train_param)
+    model, model_dir = trainNN.train(train_param)
+    
 
-    data_source, logger = train_param[2], train_param[-2]
+    data_source, logger = train_param[3], train_param[-2]
     train, trainLabel, test, testLabel = data_source
     #train
     pred_Label = model(torch.tensor(train.copy()).to(torch.device("cuda"))).detach().cpu() > 0.5
@@ -103,3 +105,4 @@ def shokri_membership_inference_one_shadow_model(train_param):
     prety_print_result(testLabel, pred_Label, logger)
     score = roc_auc_score(testLabel, pred_Label)
     logger.info('shokri_membership_inference_one_shadow_model / roc_auc_score /' + str(score))
+    copyfile(log_path, model_dir + '/train.log')   ## copy log to model save dir

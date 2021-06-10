@@ -24,6 +24,7 @@ from model import *
 from torch.optim import *
 from torch.nn import *
 import torchvision.models as models
+import copy
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,5'
 
@@ -31,7 +32,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,5'
 
 def train(train_param):
 
-    (dataset, dataset_custom, data_source, data_transform, id, model_name, model_type, summary_model_shape, seed, nm, ep, batch_size, test_batch_size, epochs, param, optimizer_name, lr, loss_function_name, gamma, log_interval, logger, save_model) = train_param
+    (sub_method, dataset, dataset_custom, data_source, data_transform, id, model_name, model_type, summary_model_shape, seed, nm, ep, batch_size, test_batch_size, epochs, param, optimizer_name, lr, loss_function_name, gamma, log_interval, logger, save_model) = train_param
 
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -54,6 +55,8 @@ def train(train_param):
     if nm != -1: 
         eps = compute_epsilon((epochs+1) * 60000 / batch_size,nm)
         logger.info('epsilon: ' + str(eps))
+        print(eps)
+        #print(aaa)
 
     train_kwargs = {'batch_size': batch_size}
     test_kwargs = {'batch_size': test_batch_size}
@@ -81,55 +84,66 @@ def train(train_param):
         model =  globals()[model_name](data.shape, 1).to(device)
         summary(model, summary_model_shape)
     else:
-        model =  globals()[model_name](param).to(device)
-        summary(model, summary_model_shape)
+        if sub_method[1]: ##Tempered Sigmoid
+            model_name = model_name + '_TS'
+            model =  globals()[model_name](param).to(device)
+            summary(model, summary_model_shape)
+        else:
+            model =  globals()[model_name](param).to(device)
+            summary(model, summary_model_shape)
 
     optimizer = globals()[optimizer_name](model.parameters(), lr)
     loss_function = globals()[loss_function_name](reduction='sum')
-    #scheduler = StepLR(optimizer, step_size=5, gamma=0.7)
-
-    model_param_prune = False
-    gradient_prune = False
+    scheduler = StepLR(optimizer, step_size=50, gamma=0.7)
 
     #train phase
+    
     model_path = "model/" + str(id) + "_dataset_" + dataset + "_ep_" + str(ep) + "_nm_" + str(nm) + \
-    "_epoch_" + str(epochs) + "_param_" + str(param) + "_dataset_custom_"\
-        + str(dataset_custom) + "_model_type_" + str(model_type) + "_" + str(time.time()) + "/"
+        "_epoch_" + str(epochs) + "_" + str(time.time()) + "/"
+    sub_method_name = ['Laplacian_Smoothing', 'Tempered_Sigmoid' , 'Gradient_Encoding', 'model_pruning']
+    for i in range(len(sub_method)):
+        if sub_method[i]:
+            model_path = model_path[:-1] + "_" + sub_method_name[i] + "/"
     os.makedirs(model_path, exist_ok=True) 
     # slide window for calculate past average test acc, if exceed specific threshold then save model
-    slide_window = 3
+    slide_window = 1
     acc_test_list = []
-    bool_first_exceed = [0,0,0,0,0,0,0] #0.3,0.4,0.5, 0.6, 0.7, 0.8, 0.9
+    bool_first_exceed = [0,0,0,0,0,0,0,0,0] #0.1,0.2,0.3,0.4,0.5, 0.6, 0.7, 0.8, 0.9
+
+    ### Gradient Encoding, collect grad before dp training
+    if sub_method[2]:
+        epochs_GEC = 50
+        model_GEC = copy.deepcopy(model)
+        optimizer_GEC = globals()[optimizer_name](model_GEC.parameters(), lr)
+        scheduler_GEC = StepLR(optimizer_GEC, step_size=100, gamma=0.7)
+        grad_dict, grads, max_grad_norm, idx_list = util.Gradient_encoding_collect(model_GEC, device, train_loader, optimizer_GEC, scheduler_GEC, loss_function, epochs_GEC, logger)
     
+    #import ipdb; ipdb.set_trace()
     for epoch in range(1, epochs + 1):
-        acc_train = util.train(model, device, train_loader, optimizer, epoch, model_param_prune, gradient_prune, batch_size, nm, loss_function, logger, num_classes, log_interval)
+        if sub_method[2]:
+            acc_train = util.train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, batch_size, nm, loss_function, logger, num_classes, log_interval, grad_dict, grads, max_grad_norm, idx_list)
+        else:
+            acc_train = util.train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, batch_size, nm, loss_function, logger, num_classes, log_interval)
         acc_test = util.test(model, device, test_loader, test_batch_size, loss_function, logger)
         acc_test_list.append(acc_test)
-        if np.mean(acc_test_list[-slide_window:]) > 0.3 and id != None:
-            acc = int(np.mean(acc_test_list[-slide_window:]) * 10)
-            if acc >= 3:
-                if bool_first_exceed[acc-5] != 1:
-                    bool_first_exceed[acc-5] = 1
-                    torch.save(model.state_dict(), model_path + "model_0." + str(acc) + ".pt")
-                    logger.info('save model/acc: ' + str(acc_test) + '/epoch: ' + str(epoch))
+        acc = int(np.mean(acc_test_list[-slide_window:]) * 10)
+        if bool_first_exceed[acc-1] != 1:
+            bool_first_exceed[acc-1] = 1
+            torch.save(model.state_dict(), model_path + "model_acc_0." + str(acc) + ".pt")
+            logger.info('save model/acc: ' + str(acc_test) + '/epoch: ' + str(epoch))
+        if epoch in [10,50,100,200]:
+            torch.save(model.state_dict(), model_path + "model_epoch_" + str(epoch) + ".pt")
+            logger.info('save model/epoch: ' + str(epoch))
 
-
-    if model_param_prune:
-        #clip by rate to fix weight sparsity, model weight
-        with torch.no_grad():
-            for idx, p in enumerate(model.parameters()):
-                shape = p.shape
-                temp = p.view(-1)
-                idx = torch.argsort(temp, dim=0)
-                for i in range(len(idx)):
-                    if idx[i] < len(temp) * 0.9:
-                        temp[i] = 0
-                p = temp.view(shape)
+    ##model parameter pruning
+    if sub_method[3]:
+    #clip model weight by rate to fix weight sparsity
+        model = util.model_pruning(model)
     
     new_model_path = model_path[:-1] + '_' + str(acc_train) + '_' + str(acc_test)+ '/'
     os.rename(model_path, new_model_path) 
     if save_model:
         torch.save(model.state_dict(),  new_model_path + "model.pt")
     
-    return model
+    return model, new_model_path
 

@@ -136,12 +136,163 @@ def grad_dp_lay(model, inputs, labels, loss_function, num_classes, gradient_norm
         batch_grad.append(temp_tenor)        
     return batch_grad, per_grad_norm, total_loss
 
-GRADIENT_NORM_CLIP = 1.
-SENSITIVITY = 2.
 
-def train(model, device, train_loader, optimizer, epoch, model_param_prune, gradient_prune, batch_size, nm, loss_function, logger, num_classes, log_interval=10):
+def Laplacian_smoothing(net, sigma=1):
+    ## after add dp noise
+    for p_net in net.parameters():
+        size_param = torch.numel(p_net)
+        tmp = p_net.grad.view(-1, size_param)
+
+        c = np.zeros(shape=(1, size_param))
+        c[0, 0] = -2.; c[0, 1] = 1.; c[0, -1] = 1.
+        c = torch.Tensor(c).cuda()
+        zero_N = torch.zeros(1, size_param).cuda()
+        c_fft = torch.rfft(c, 1, onesided=False)
+        coeff = 1./(1.-sigma*c_fft[...,0])
+        ft_tmp = torch.rfft(tmp, 1, onesided=False)
+        tmp = torch.zeros_like(ft_tmp)
+        tmp[...,0] = ft_tmp[...,0]*coeff
+        tmp[...,1] = ft_tmp[...,1]*coeff
+        tmp = torch.irfft(tmp, 1, onesided=False)
+        tmp = tmp.view(p_net.grad.size())
+        p_net.grad.data = tmp
+
+    return net
+
+def model_pruning(net, clip_rate=0.5):
+    with torch.no_grad():
+        for p_net in net.parameters():
+            shape = p_net.grad.shape
+            temp = p_net.grad.view(-1)
+            sign = torch.ones_like(temp)
+            ##store sign
+            for i in range(len(temp)):
+                if temp[i] < 0:
+                    sign[i] = -1
+        
+            temp = torch.abs(temp)
+            idx = torch.argsort(temp, dim=0)
+            for i in range(len(idx)):
+                if idx[i] < len(temp) * clip_rate:
+                    temp[i] = 0
+                else:
+                    temp[i] = temp[i] * sign[i]
+            p_net = temp.view(shape)
+    return net
+
+##considering computing time, not sort every batch but clip by a threshold
+def model_pruning_relax(net, epoch, thres=None):
+    if epoch < 10:  ## by algo. 2.
+        return net
+    else:
+        with torch.no_grad():
+            for p_net in net.parameters():
+                #import ipdb; ipdb.set_trace()
+                shape = p_net.shape
+                temp = p_net.view(-1)
+                if thres is None:
+                    #thres = np.mean(temp.cpu().numpy())# + np.std(temp.cpu().numpy())
+                    thres = 1e-4
+                for i in range(len(temp)):
+                    if torch.abs(temp[i]) < thres:
+                        temp[i] = 0
+                p_net = temp.view(shape)
+        return net
+
+def Gradient_encoding_collect(model, device, train_loader, optimizer, scheduler, loss_function, epochs, logger):
     model.train()
+    # import ipdb; ipdb.set_trace()
+    SAMPLE_NUM = 1000
+    grad_dict = {}
+    grads = []
+    iter_num=0
+    max_grad_norm_list = []
+
+    for epoch in range(1, epochs + 1):
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.float().to(device), target.long().to(device)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = loss_function(output, target)
+            loss.backward()
+            #import ipdb; ipdb.set_trace()
+            grad_dict[iter_num] = [p.grad.clone() for p in model.parameters()]
+            max_grad_norm_list.append([np.linalg.norm(p.grad.clone().cpu().numpy().reshape(-1), 2) for p in model.parameters()])
+            g_vec = torch.cat([g.view(-1) for g in grad_dict[batch_idx]])
+            grads.append(g_vec)
+            iter_num += 1
+            optimizer.step()
+            scheduler.step()
+            if batch_idx % 10 == 0:
+                print('Collect Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    epoch, batch_idx * len(data), len(train_loader.dataset),
+                    100. * batch_idx / len(train_loader), loss.item()/ len(data)))
+
+        ### cal train acc
+        correct = 0
+        train_loss = 0
+
+        with torch.no_grad():
+            for data, target in train_loader:
+                data, target = data.float().to(device), target.long().to(device)
+                output = model(data)
+                
+                if type(loss_function) is torch.nn.modules.loss.BCELoss or type(loss_function) is torch.nn.modules.loss.BCEWithLogitsLoss:
+                    ##BCE loss needs specific label
+                    #target_onehot = torch.zeros([target.shape[0], 2]).to(device)
+                    #target_onehot = target_onehot.scatter_(1, target.view(-1,1), 1)
+                    target = target.view(-1,1).float()
+                    train_loss += loss_function(output, target)
+                    assert target.size() == output.size()
+                    pred = output > 0.5
+                else:
+                
+                    train_loss += loss_function(output, target) 
+                    pred = output.argmax(dim=1, keepdim=True)  
+
+
+                correct += pred.eq(target.view_as(pred)).sum().item()
+
+        train_loss /= len(train_loader.dataset)
+
+        logger.info('\nTrain set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+            train_loss, correct, len(train_loader.dataset),
+            100. * correct / len(train_loader.dataset)))
+
+
+    #import ipdb; ipdb.set_trace()
+    shuffle_indices = np.arange(iter_num)
+    np.random.shuffle(shuffle_indices)
+    idx_list = np.array(range(iter_num))[shuffle_indices][:SAMPLE_NUM]
+    ## sample the number SAMPLE_NUM of grads
+    grads = [grads[i] for i in range(len(grads)) if i in idx_list]
+    max_grad_norm_list = [max_grad_norm_list[i] for i in range(len(max_grad_norm_list)) if i in idx_list]
+    ## calculate max grad l2 norm
+    max_grad_norm = np.max(np.array(max_grad_norm_list).reshape(-1))
     
+    logger.info('\nmax_grad_norm ({:.4f})\n'.format(max_grad_norm))
+
+    return grad_dict, grads, max_grad_norm, idx_list
+
+def Gradient_encoding_apply(model, grad_dict, grads, idx_list, device):
+    g_vec = torch.cat([p.grad.view(-1) for p in model.parameters()])
+    cos = torch.nn.CosineSimilarity()
+    dist_mat = cos(g_vec.unsqueeze(0), torch.tensor([item.cpu().detach().numpy() for item in grads]).to(device))
+    #import ipdb; ipdb.set_trace()
+    min_idx = int(dist_mat.argmin().data.cpu().numpy())
+    #bk_vec = grads[min_idx,:] # Debug
+    for idx, p in enumerate(model.parameters()):
+        p.grad = grad_dict[idx_list[min_idx]][idx]
+
+    return model
+
+
+
+def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, batch_size, nm, loss_function, logger, num_classes, log_interval=10, grad_dict=None, grads=None, max_grad_norm=None, idx_list=None):
+    model.train()
+    GRADIENT_NORM_CLIP = 1.
+    SENSITIVITY = 2.
+
     # import ipdb; ipdb.set_trace()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.float().to(device), target.long().to(device)
@@ -150,50 +301,56 @@ def train(model, device, train_loader, optimizer, epoch, model_param_prune, grad
         optimizer.zero_grad()
         loss_value = 0
 
-        if model_param_prune:
-            #clip by threshold, model weight
-            with torch.no_grad():
-                for idx, p in enumerate(model.parameters()):
-                    shape = p.shape
-                    temp = p.view(-1)
-                    thres = np.mean(temp.cpu().numpy())# + np.std(temp.cpu().numpy())
-                    #thres = 1e-4
-                    for i in range(len(temp)):
-                        if temp[i] < thres:
-                            temp[i] = 0
-                    p = temp.view(shape)
         
         if nm > 0:
             beta = 1
-            iter_grad=0
-            batch_grad, _, loss=grad_dp_lay(model,data,target,loss_function,num_classes,GRADIENT_NORM_CLIP,beta)
-            loss_value += loss
+            ### Gradient Encoding
+            if sub_method[2]:
 
-            for p in model.parameters():
-                size_param = torch.numel(p)
-                tmp = p.grad.view(-1, size_param)
-                noise_g = beta*nm*SENSITIVITY*torch.zeros_like(tmp.data).normal_()
-                p.grad.data = (batch_grad[iter_grad].view(-1, size_param)/batch_size+noise_g/batch_size).view(p.grad.size())
-                iter_grad=iter_grad+1
+                output = model(data)
+                ##BCE loss needs specific label
+                if type(loss_function) is torch.nn.modules.loss.BCELoss or type(loss_function) is torch.nn.modules.loss.BCEWithLogitsLoss:
+                    #target_onehot = torch.zeros([target.shape[0], 2]).to(device)
+                    #target = target_onehot.scatter_(1, target.view(-1,1), 1)
+                    target = target.view(-1,1).float()
+                loss = loss_function(output, target)
+                loss.backward()
+                loss_value = loss.item() / batch_size
+                import ipdb; ipdb.set_trace()
+                model = Gradient_encoding_apply(model, grad_dict, grads, idx_list, device)
+                SENSITIVITY = max_grad_norm * 2
 
-                if gradient_prune:
-                    #sort and clip
-                    shape = p.grad.shape
-                    temp = p.grad.view(-1)
-                    sign = torch.ones_like(temp)
-                    ##store sign
-                    for i in range(len(temp)):
-                        if temp[i] < 0:
-                            sign[i] = -1
-                
-                    temp = torch.abs(temp)
-                    idx = torch.argsort(temp, dim=0)
-                    for i in range(len(idx)):
-                        if idx[i] < len(temp) * 0.5:
-                            temp[i] = 0
-                        else:
-                            temp[i] = temp[i] * sign[i]
-                    p.grad = temp.view(shape)
+                clip_bound_ = GRADIENT_NORM_CLIP / batch_size
+                SENSITIVITY = GRADIENT_NORM_CLIP * 2
+
+                for p in model.parameters():
+                    size_param = torch.numel(p)
+                    tmp = p.grad.view(-1, size_param)
+                    ### clip
+                    grad_norm = torch.norm(tmp.data, p=2, dim=1)
+
+                    clip_coef = clip_bound_ / (grad_norm + 1e-10)
+                    clip_coef = torch.min(clip_coef, torch.ones_like(clip_coef))
+                    clip_coef = clip_coef.unsqueeze(-1)
+                    tmp.data = clip_coef * tmp.data
+                    ### noise
+                    noise_g = beta*nm*SENSITIVITY*torch.zeros_like(tmp.data).normal_()
+                    p.grad.data = (tmp.data/batch_size+noise_g/batch_size).view(p.grad.size())
+            else:
+                batch_grad, _, loss=grad_dp_lay(model,data,target,loss_function,num_classes,GRADIENT_NORM_CLIP,beta)
+
+                iter_grad=0
+                for p in model.parameters():
+                    size_param = torch.numel(p)
+                    tmp = p.grad.view(-1, size_param)
+                    noise_g = beta*nm*SENSITIVITY*torch.zeros_like(tmp.data).normal_()
+                    p.grad.data = (batch_grad[iter_grad].view(-1, size_param)/batch_size+noise_g/batch_size).view(p.grad.size())
+                    iter_grad=iter_grad+1
+            
+                loss_value += loss
+            ### Laplacian_smoothing
+            if sub_method[0]: 
+                model = Laplacian_smoothing(model)
 
         else:
             output = model(data)
@@ -205,32 +362,18 @@ def train(model, device, train_loader, optimizer, epoch, model_param_prune, grad
                 target = target.view(-1,1).float()
             
             loss = loss_function(output, target)
-            
             loss.backward()
-            if gradient_prune:
-                for idx, p in enumerate(model.parameters()):
-                    shape = p.grad.shape
 
-                    #sort and clip
-                    shape = p.grad.shape
-                    temp = p.grad.view(-1)
-                    sign = torch.ones_like(temp)
-                    ##store sign
-                    for i in range(len(temp)):
-                        if temp[i] < 0:
-                            sign[i] = -1
-                
-                    temp = torch.abs(temp)
-                    idx = torch.argsort(temp, dim=0)
-                    for i in range(len(idx)):
-                        if idx[i] < len(temp) * 0.5:
-                            temp[i] = 0
-                        else:
-                            temp[i] = temp[i] * sign[i]
-                    p.grad = temp.view(shape)
-
-        loss_value = loss.item() / batch_size
+            loss_value = loss.item() / batch_size
         optimizer.step()
+        scheduler.step()
+
+
+        ##model parameter pruning
+        if sub_method[3]:
+        #clip model weight by threshold, speed up compared to clip by rate
+            model = model_pruning_relax(model, epoch)
+
         if batch_idx % log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
