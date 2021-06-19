@@ -4,3 +4,7 @@ _*
 *.pt
 *.png
 *.log
+*/data/*
+*data/*
+*model/*
+*.txt

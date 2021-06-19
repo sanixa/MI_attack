@@ -26,7 +26,7 @@ import torchvision.models as models
 from shutil import copyfile
 
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+os.environ['CUDA_VISIBLE_DEVICES'] = '5'
 dataPath = './data/'
 
 
@@ -195,13 +195,13 @@ def main():
     
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-    parser.add_argument('--batch-size', type=int, default=64, metavar='N',
+    parser.add_argument('--batch-size', type=int, default=100, metavar='N',
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                         help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=50, metavar='N',
+    parser.add_argument('--epochs', type=int, default=200, metavar='N',
                         help='number of epochs to train (default: 14)')
-    parser.add_argument('--lr', type=float, default=1.0, metavar='LR',
+    parser.add_argument('--lr', type=float, default=2e-3, metavar='LR',
                         help='learning rate (default: 1.0)')
     parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
                         help='Learning rate step gamma (default: 0.7)')
@@ -229,6 +229,9 @@ def main():
                         help='dataset name')
     parser.add_argument('--param', type=int, default='0',
                         help='cnn and generator parameter amount')
+    parser.add_argument('--loss-name', type=str, default='CrossEntropyLoss',
+                        help='loss function name')
+                            
     args = parser.parse_args()
     log_path = "log/dataset_" + args.dataset + "_ep_" + str(args.ep) + "_nm_" + str(args.nm) + \
                          "_param_" + str(args.param) + "_" + str(time.time())+ "_exp.log"
@@ -240,7 +243,7 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     
-    sub_method = [True, False, False, False] ##Laplacian Smoothing , Tempered Sigmoid , Gradient Encoding, model pruning
+    sub_method = [False, False, True, False] ##Laplacian Smoothing , Tempered Sigmoid , Gradient Encoding, model pruning
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
@@ -256,62 +259,71 @@ def main():
     if(args.update_dataset):
         initializeData(args.dataset, logger)
     ## use for shokri_membership_inference
-    Target_dataset = args.dataset
-    Shadow_dataset = args.dataset
+
     print('--------------load data-----------------------')
-    targetTrain, targetTrainLabel  = load_data(dataPath + Target_dataset + '/targetTrain.npz')
-    targetTest,  targetTestLabel   = load_data(dataPath + Target_dataset + '/targetTest.npz')
-    shadowTrain, shadowTrainLabel  = load_data(dataPath + Shadow_dataset + '/shadowTrain.npz')
-    shadowTest,  shadowTestLabel   = load_data(dataPath + Shadow_dataset + '/shadowTest.npz')
+    targetTrain, targetTrainLabel  = load_data(dataPath + args.dataset + '/targetTrain.npz')
+    targetTest,  targetTestLabel   = load_data(dataPath + args.dataset + '/targetTest.npz')
+    shadowTrain, shadowTrainLabel  = load_data(dataPath + args.dataset + '/shadowTrain.npz')
+    shadowTest,  shadowTestLabel   = load_data(dataPath + args.dataset + '/shadowTest.npz')
+
+    if args.dataset == 'mnist':
+        model_name = 'ConvNet_mnist'
+    elif args.dataset == 'cifar_10':
+        model_name = 'ResNet18v2_cifar10'
+    elif args.dataset == 'cifar_100':
+        model_name = 'ConvNet_cifar100'
 
     #Load TARGET model
     print('--------------load model-----------------------')
     data_source=(targetTrain, targetTrainLabel, targetTest, targetTestLabel)
     #model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Target', Target_dataset, 'resnet50', args.seed, args.nm, 64, 30, 'Adam', 9e-5, 'CrossEntropyLoss'  ##nondp
-    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Target', Target_dataset, 'ResNet18v2_cifar10', args.seed, args.nm, 100, 200, 'Adam', 2e-3, 'CrossEntropyLoss' ##dp
-    
-    train_param = (sub_method, dataset, True, data_source, True, model_name, model_type, 'cnn', (3,32,32), args.seed, args.nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
+    #model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Target', Target_dataset, 'ConvNet_mnist', args.seed, args.nm, 100, 200, 'Adam', 2e-3, 'CrossEntropyLoss' ##dp
+    model_id = 'Target'
+    model_type = 'multi_class'
+
+    #train_param = (sub_method, dataset, True, data_source, True, model_name, model_type, 'cnn', (1,28,28), args.seed, args.nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
     logger.info('---------------------hyperparameter-----------------------')
-    logger.info('model: {}, model_type: {}, seed: {}, nm: {}, batchsize: {}, epoch: {}, optimizer: {}, lr: {}, loss: {}'.format(model_name,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name))
+    logger.info('model_id: {}, model_type: {}, seed: {}, nm: {}, batchsize: {}, epoch: {}, lr: {}, loss: {}'.format(model_name,model_type,args.seed,args.nm,args.batch_size,args.epochs,args.lr,args.loss_name))
     logger.info('train/load target model')
     if args.train_target_model:
-        target_model, model_dir = trainNN.train(train_param)
+        target_model, model_dir = trainNN.train(args, sub_method, model_id, model_name, model_type, data_source, logger)
         copyfile(log_path, model_dir + '/train.log')   ## copy log to model save dir
     else:
-        if Target_dataset == 'cifar_100':
+        if args.dataset == 'cifar_100':
             target_model = model.ConvNet_cifar100(args.param).to(device)
             target_model.load_state_dict(torch.load("model/target_dataset_cifar_100_ep_-1_nm_-1_epoch_30_param_0_dataset_custom_1_model_type_cnn.pt"))
-        elif Target_dataset == 'mnist':
+        elif args.dataset == 'mnist':
             target_model = model.ConvNet_mnist(args.param).to(device)
-            target_model.load_state_dict(torch.load("model/save/Target_dataset_mnist_ep_1.0_nm_2.93_epoch_200_param_0_dataset_custom_True_model_type_cnn_1622918825.5007777_90.57_0.9389/model_acc_0.9.pt"))
-        elif Target_dataset == 'cifar_10':
+            target_model.load_state_dict(torch.load("model/save/exp2/Target_dataset_mnist_ep_-1_nm_-1_epoch_200_1623232049.0586293_model_pruning_98.82_0.9798/model.pt"))
+        elif args.dataset == 'cifar_10':
             target_model = model.ResNet18v2_cifar10(args.param).to(device)
-            target_model.load_state_dict(torch.load("model/save/Target_dataset_cifar_10_ep_1000_nm_0.234_epoch_200_param_0_dataset_custom_True_model_type_cnn_1622704733.9986558_84.79_0.5611/model_acc_0.2.pt"))
+            target_model.load_state_dict(torch.load("model/save/exp2/Target_dataset_cifar_10_ep_10.0_nm_0.667_epoch_200_1623247957.505025_Laplacian_Smoothing_30.06_0.2682/model.pt"))
             #target_model = model.resnet50(args.param).to(device)
             #target_model.load_state_dict(torch.load("model/+Target_dataset_cifar_10_ep_-1_nm_-1_epoch_150_param_0_dataset_custom_True_model_type_cnn_1618557344.0328155_99.29_0.6997/model_0.6.pt"))
 
     data_source=(shadowTrain, shadowTrainLabel, shadowTest, shadowTestLabel)
+    model_id = 'Shadow'
     #model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Shadow', Shadow_dataset, 'resnet101', args.seed, args.nm, 64, 5, 'Adam', 6e-6, 'CrossEntropyLoss'
-    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Shadow', Shadow_dataset, 'ResNet18v2_cifar10', args.seed, args.nm, 100, 200, 'Adam', 2e-3, 'CrossEntropyLoss'
+    #model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'Shadow', Shadow_dataset, 'ConvNet_mnist', args.seed, args.nm, 100, 200, 'Adam', 2e-3, 'CrossEntropyLoss'
     
-    train_param = (sub_method, dataset, True, data_source, True, model_name, model_type, 'cnn', (3,32,32), seed, args.nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
+    #train_param = (sub_method, dataset, True, data_source, True, model_name, model_type, 'cnn', (1,28,28), seed, args.nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
     logger.info('---------------------hyperparameter-----------------------')
-    logger.info('model: {}, model_type: {}, seed: {}, nm: {}, batchsize: {}, epoch: {}, optimizer: {}, lr: {}, loss: {}'.format(model_name,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name))
+    logger.info('model: {}, model_type: {}, seed: {}, nm: {}, batchsize: {}, epoch: {}, lr: {}, loss: {}'.format(model_name,model_type,args.seed,args.nm,args.batch_size,args.epochs,args.lr,args.loss_name))
     logger.info('train/load shadow model')
     # train or load SHADOW model
     if args.train_shadow_model:
-        shadow_model, model_dir = trainNN.train(train_param)
+        shadow_model, model_dir = trainNN.train(args, sub_method, model_id, model_name, model_type, data_source, logger)
         copyfile(log_path, model_dir + '/train.log')   ## copy log to model save dir
     else:
-        if Shadow_dataset == 'cifar_100':
+        if args.dataset == 'cifar_100':
             shadow_model = model.ConvNet_cifar100(args.param).to(device)
             shadow_model.load_state_dict(torch.load("model/shadow_dataset_cifar_100_ep_-1_nm_-1_epoch_5_param_0_dataset_custom_1_model_type_cnn.pt"))
-        elif Shadow_dataset == 'mnist':
+        elif args.dataset == 'mnist':
             shadow_model = model.ConvNet_mnist(args.param).to(device)
-            shadow_model.load_state_dict(torch.load("model/save/Shadow_dataset_mnist_ep_1.0_nm_2.93_epoch_200_param_0_dataset_custom_True_model_type_cnn_1622932423.8249445_91.2_0.9313/model_acc_0.9.pt"))
-        elif Shadow_dataset == 'cifar_10':
+            shadow_model.load_state_dict(torch.load("model/save/exp2/Shadow_dataset_mnist_ep_-1_nm_-1_epoch_200_1623306818.9482195_model_pruning_98.5_0.9762/model.pt"))
+        elif args.dataset == 'cifar_10':
             shadow_model = model.ResNet18v2_cifar10(args.param).to(device)
-            shadow_model.load_state_dict(torch.load("model/save/Shadow_dataset_cifar_10_ep_1000_nm_0.234_epoch_200_param_0_dataset_custom_True_model_type_cnn_1622792996.1076574_84.04_0.5537/model_acc_0.2.pt"))
+            shadow_model.load_state_dict(torch.load("model/save/Shadow_dataset_cifar_10_ep_10.0_nm_0.667_epoch_200_1623359498.9434292_Laplacian_Smoothing_30.69_0.2768/model_acc_0.2.pt"))
             #shadow_model = model.resnet101(args.param).to(device)
             #shadow_model.load_state_dict(torch.load("model/+Shadow_dataset_cifar_10_ep_-1_nm_-1_epoch_150_param_0_dataset_custom_True_model_type_cnn_1618560379.3184357_99.55_0.6964/model_0.6.pt"))
     logger.info('train/load model end')
@@ -333,7 +345,7 @@ def main():
 
     target_model.train()
     data_source=(targetTrain, targetTrainLabel, targetTest, targetTestLabel)
-    train_dataset, test_dataset, _ = util.construct_dataset(Target_dataset, data_source)
+    train_dataset, test_dataset, _ = util.construct_dataset(args.dataset, data_source)
     train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
     test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
     with torch.no_grad():
@@ -375,7 +387,7 @@ def main():
     ## 
     shadow_model.train()
     data_source=(shadowTrain, shadowTrainLabel, shadowTest, shadowTestLabel)
-    train_dataset, test_dataset, _ = util.construct_dataset(Shadow_dataset, data_source)
+    train_dataset, test_dataset, _ = util.construct_dataset(args.dataset, data_source)
     train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
     test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
 
@@ -416,64 +428,8 @@ def main():
     topX = 10
     target_attack_x = clipDataTopX(target_attack_x,top=topX)
     shadow_attack_x = clipDataTopX(shadow_attack_x,top=topX)
-    
     '''
-    
-    '''
-    y = target_attack_y.tolist()
-    print(target_attack_x.shape, target_attack_y.shape)
-    
-    tsne = manifold.TSNE(n_components=2, init='pca', random_state=51)
-    X_tsne = tsne.fit_transform(target_attack_x)
-    
-    np.save('x_cifar10_target', X_tsne)
-    
-    #X_tsne = np.load('x.npz.npy').tolist()
-    #print("Org data dimension is {}. \
-        #Embedded data dimension is {}".format(target_attack_x.shape[-1], X_tsne.shape[-1]))
-    
-    ###嵌入空间可视化
-    
-    x_min, x_max = np.min(X_tsne, 0), np.max(X_tsne, 0)
-    data = (X_tsne - x_min) / (x_max - x_min)
-    for i in range(data.shape[0]):
-        plt.text(data[i, 0], data[i, 1], str(y[i]),
-                    color=plt.cm.Set1(int(y[i][0])),
-                    fontdict={'weight': 'bold', 'size': 3})
-    plt.xticks([])
-    plt.yticks([])
-    plt.title('T-SNE')
-    plt.savefig('tsne_target_cifar10_res50.png', dpi=600, format='png')
-    plt.show() 
 
-    plt.close()
-    y = shadow_attack_y.tolist()
-    print(shadow_attack_x.shape, shadow_attack_y.shape)
-    
-    tsne = manifold.TSNE(n_components=2, init='pca', random_state=51)
-    X_tsne = tsne.fit_transform(shadow_attack_x)
-    
-    np.save('x_cifar10_shadow', X_tsne)
-    
-    #X_tsne = np.load('x.npz.npy').tolist()
-    #print("Org data dimension is {}. \
-        #Embedded data dimension is {}".format(target_attack_x.shape[-1], X_tsne.shape[-1]))
-    
-    ###嵌入空间可视化
-    
-    x_min, x_max = np.min(X_tsne, 0), np.max(X_tsne, 0)
-    data = (X_tsne - x_min) / (x_max - x_min)
-    for i in range(data.shape[0]):
-        plt.text(data[i, 0], data[i, 1], str(y[i]),
-                    color=plt.cm.Set1(int(y[i][0])),
-                    fontdict={'weight': 'bold', 'size': 3})
-    plt.xticks([])
-    plt.yticks([])
-    plt.title('T-SNE')
-    plt.savefig('tsne_shadow_cifar10_vg16.png', dpi=600, format='png')
-    plt.show() 
-    
-    '''
     shadow_attack_x = np.sort(shadow_attack_x, axis=1)[:, ::-1]
     print(shadow_attack_x.shape)
     print(shadow_attack_x[0])
@@ -483,13 +439,21 @@ def main():
 
 
     attack.yeom_membership_attack(shadow_per_instance_loss, shadow_attack_y, avg_train_loss, logger=logger)
-    data_source=(shadow_attack_x, shadow_attack_y.astype('long').reshape(-1), target_attack_x, target_attack_y.astype('long').reshape(-1))
-    model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'attack', Shadow_dataset, 'softmax_model', args.seed, args.nm, 64, 15, 'Adam', 1e-4, 'BCELoss'
     
-    train_param = (sub_method, dataset, True, data_source, True, model_name, model_type, 'softmax', None, seed, nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
+    data_source=(shadow_attack_x, shadow_attack_y.astype('long').reshape(-1), target_attack_x, target_attack_y.astype('long').reshape(-1))
+    #model_name,dataset,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name = 'attack', Shadow_dataset, 'softmax_model', args.seed, args.nm, 64, 15, 'Adam', 1e-4, 'BCELoss'
+    model_id = 'attack'
+    model_type = 'binary_class'
+    model_name = 'softmax_model'
+    args.lr = 1e-4
+    args.batch_size = 64
+    args.epochs = 15
+    args.loss_name = 'BCELoss'
+
+    #train_param = (sub_method, dataset, True, data_source, True, model_name, model_type, 'softmax', None, seed, nm, args.ep, batchsize, batchsize, epoch, 0, optimizer, lr, loss_name, 0.9, 10, logger, True)
     logger.info('---------------------hyperparameter-----------------------')
-    logger.info('model: {}, model_type: {}, seed: {}, nm: {}, batchsize: {}, epoch: {}, optimizer: {}, lr: {}, loss: {}'.format(model_name,model_type,seed,nm,batchsize,epoch,optimizer,lr,loss_name))
-    attack.shokri_membership_inference_one_shadow_model(train_param, log_path)
+    logger.info('model: {}, model_type: {}, seed: {}, nm: {}, batchsize: {}, epoch: {}, lr: {}, loss: {}'.format(model_name,model_type,args.seed,args.nm,args.batch_size,args.epochs,args.lr,args.loss_name))
+    attack.shokri_membership_inference_one_shadow_model(args, sub_method, model_id, model_name, model_type, data_source, logger, log_path)
 
 
 

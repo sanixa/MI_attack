@@ -4,8 +4,10 @@ from torch.utils.data.dataset import Dataset
 from torchvision import datasets, transforms
 import copy,os
 import numpy as np
+from pyvacy.pyvacy import optim, analysis, sampling
+from torch.utils.data import Dataset, TensorDataset
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,5'
+os.environ['CUDA_VISIBLE_DEVICES'] = '5'
 
 def get_logger(filename, verbosity=1, name=None):
     level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
@@ -47,7 +49,7 @@ class MyCustomDataset(Dataset):
         count = len(self.X)
         return count # of how many data(images?) you have
 
-def construct_dataset(dataset, data_source=None, data_transform=1):
+def construct_dataset(dataset, data_source=None):
     transform = None
     if dataset == 'mnist':
         transform=transforms.Compose([
@@ -199,7 +201,7 @@ def model_pruning_relax(net, epoch, thres=None):
                 p_net = temp.view(shape)
         return net
 
-def Gradient_encoding_collect(model, device, train_loader, optimizer, scheduler, loss_function, epochs, logger):
+def Gradient_encoding_collect(model, device, train_loader, batch_size, optimizer, scheduler, loss_function, epochs, logger):
     model.train()
     # import ipdb; ipdb.set_trace()
     SAMPLE_NUM = 1000
@@ -208,62 +210,37 @@ def Gradient_encoding_collect(model, device, train_loader, optimizer, scheduler,
     iter_num=0
     max_grad_norm_list = []
 
+
     for epoch in range(1, epochs + 1):
         for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.float().to(device), target.long().to(device)
             optimizer.zero_grad()
+            data, target = data.float().to(device), target.long().to(device)
             output = model(data)
             loss = loss_function(output, target)
+
+            
             loss.backward()
-            #import ipdb; ipdb.set_trace()
-            grad_dict[iter_num] = [p.grad.clone() for p in model.parameters()]
-            max_grad_norm_list.append([np.linalg.norm(p.grad.clone().cpu().numpy().reshape(-1), 2) for p in model.parameters()])
-            g_vec = torch.cat([g.view(-1) for g in grad_dict[batch_idx]])
-            grads.append(g_vec)
-            iter_num += 1
             optimizer.step()
-            scheduler.step()
+            #import ipdb; ipdb.set_trace()
+            if torch.rand(1) > 0.25:
+                grad_dict[iter_num] = [p.grad.clone() for p in model.parameters()]
+                max_grad_norm_list.append([np.linalg.norm(p.grad.clone().cpu().numpy().reshape(-1), 2) for p in model.parameters()])
+                g_vec = torch.cat([g.view(-1) for g in grad_dict[iter_num]])
+                grads.append(g_vec)
+                iter_num += 1
+                del g_vec
+
             if batch_idx % 10 == 0:
                 print('Collect Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                     epoch, batch_idx * len(data), len(train_loader.dataset),
                     100. * batch_idx / len(train_loader), loss.item()/ len(data)))
-
-        ### cal train acc
-        correct = 0
-        train_loss = 0
-
-        with torch.no_grad():
-            for data, target in train_loader:
-                data, target = data.float().to(device), target.long().to(device)
-                output = model(data)
-                
-                if type(loss_function) is torch.nn.modules.loss.BCELoss or type(loss_function) is torch.nn.modules.loss.BCEWithLogitsLoss:
-                    ##BCE loss needs specific label
-                    #target_onehot = torch.zeros([target.shape[0], 2]).to(device)
-                    #target_onehot = target_onehot.scatter_(1, target.view(-1,1), 1)
-                    target = target.view(-1,1).float()
-                    train_loss += loss_function(output, target)
-                    assert target.size() == output.size()
-                    pred = output > 0.5
-                else:
-                
-                    train_loss += loss_function(output, target) 
-                    pred = output.argmax(dim=1, keepdim=True)  
-
-
-                correct += pred.eq(target.view_as(pred)).sum().item()
-
-        train_loss /= len(train_loader.dataset)
-
-        logger.info('\nTrain set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-            train_loss, correct, len(train_loader.dataset),
-            100. * correct / len(train_loader.dataset)))
-
+        
+        scheduler.step()
 
     #import ipdb; ipdb.set_trace()
     shuffle_indices = np.arange(iter_num)
     np.random.shuffle(shuffle_indices)
-    idx_list = np.array(range(iter_num))[shuffle_indices][:SAMPLE_NUM]
+    idx_list = np.arange(iter_num)[shuffle_indices][:SAMPLE_NUM]
     ## sample the number SAMPLE_NUM of grads
     grads = [grads[i] for i in range(len(grads)) if i in idx_list]
     max_grad_norm_list = [max_grad_norm_list[i] for i in range(len(max_grad_norm_list)) if i in idx_list]
@@ -276,23 +253,61 @@ def Gradient_encoding_collect(model, device, train_loader, optimizer, scheduler,
 
 def Gradient_encoding_apply(model, grad_dict, grads, idx_list, device):
     g_vec = torch.cat([p.grad.view(-1) for p in model.parameters()])
-    cos = torch.nn.CosineSimilarity()
+    cos = torch.nn.CosineSimilarity(dim = 1, eps= 1e-9)
     dist_mat = cos(g_vec.unsqueeze(0), torch.tensor([item.cpu().detach().numpy() for item in grads]).to(device))
     #import ipdb; ipdb.set_trace()
-    min_idx = int(dist_mat.argmin().data.cpu().numpy())
+    max_idx = int(dist_mat.argmax().data.cpu().numpy())
     #bk_vec = grads[min_idx,:] # Debug
+    #print(dist_mat[max_idx])
     for idx, p in enumerate(model.parameters()):
-        p.grad = grad_dict[idx_list[min_idx]][idx]
+        p.grad = grad_dict[idx_list[max_idx]][idx]
 
     return model
 
 
-
-def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, batch_size, nm, loss_function, logger, num_classes, log_interval=10, grad_dict=None, grads=None, max_grad_norm=None, idx_list=None):
+def train(args, sub_method, model, device, train_dataset, train_loader, optimizer, loss_function, epoch, num_classes, logger, grad_dict=None, grads=None, max_grad_norm=None, idx_list=None):
     model.train()
     GRADIENT_NORM_CLIP = 1.
     SENSITIVITY = 2.
+    '''
+    minibatch_loader, microbatch_loader = sampling.get_data_loaders(
+        args.batch_size,
+        1,
+        args.epochs
+    )
 
+    for mini_idx, (x_mini, y_mini) in enumerate(minibatch_loader(train_dataset)):
+        optimizer.zero_grad()
+        for x_micro, y_micro in microbatch_loader(TensorDataset(x_mini, y_mini)):
+            x_micro, y_micro = x_micro.float().to(device), y_micro.long().to(device)
+            optimizer.zero_microbatch_grad()
+            loss = loss_function(model(x_micro), y_micro)
+            loss.backward()
+
+            
+            g_vec = torch.cat([p.grad.view(-1) for p in model.parameters()])
+            dist_mat = model.cdist(g_vec.unsqueeze(0), model.grads)
+            import ipdb; ipdb.set_trace()
+            closest_idx = int(dist_mat.argmax().data.cpu().numpy())
+
+            for idx, p in enumerate(model.parameters()):
+                 p.grad = model.grad_dict[closest_idx][idx]
+            
+            model = Gradient_encoding_apply(model, grad_dict, grads, idx_list, device)
+
+            optimizer.microbatch_step()
+        optimizer.step()
+
+        ##model parameter pruning
+        if sub_method[3]:
+        #clip model weight by threshold, speed up compared to clip by rate
+            model = model_pruning_relax(model, epoch)
+
+        if mini_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch, mini_idx * len(data), len(train_loader.dataset),
+                100. * mini_idx / len(train_loader), loss_value))
+    '''
     # import ipdb; ipdb.set_trace()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.float().to(device), target.long().to(device)
@@ -302,7 +317,7 @@ def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, 
         loss_value = 0
 
         
-        if nm > 0:
+        if args.nm > 0:
             beta = 1
             ### Gradient Encoding
             if sub_method[2]:
@@ -315,12 +330,12 @@ def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, 
                     target = target.view(-1,1).float()
                 loss = loss_function(output, target)
                 loss.backward()
-                loss_value = loss.item() / batch_size
-                import ipdb; ipdb.set_trace()
+                loss_value = loss.item() / args.batch_size
+                #import ipdb; ipdb.set_trace()
                 model = Gradient_encoding_apply(model, grad_dict, grads, idx_list, device)
                 SENSITIVITY = max_grad_norm * 2
 
-                clip_bound_ = GRADIENT_NORM_CLIP / batch_size
+                clip_bound_ = GRADIENT_NORM_CLIP / args.batch_size
                 SENSITIVITY = GRADIENT_NORM_CLIP * 2
 
                 for p in model.parameters():
@@ -334,8 +349,8 @@ def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, 
                     clip_coef = clip_coef.unsqueeze(-1)
                     tmp.data = clip_coef * tmp.data
                     ### noise
-                    noise_g = beta*nm*SENSITIVITY*torch.zeros_like(tmp.data).normal_()
-                    p.grad.data = (tmp.data/batch_size+noise_g/batch_size).view(p.grad.size())
+                    noise_g = beta*args.nm*SENSITIVITY*torch.zeros_like(tmp.data).normal_()
+                    p.grad.data = (tmp.data/args.batch_size+noise_g/args.batch_size).view(p.grad.size())
             else:
                 batch_grad, _, loss=grad_dp_lay(model,data,target,loss_function,num_classes,GRADIENT_NORM_CLIP,beta)
 
@@ -343,11 +358,11 @@ def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, 
                 for p in model.parameters():
                     size_param = torch.numel(p)
                     tmp = p.grad.view(-1, size_param)
-                    noise_g = beta*nm*SENSITIVITY*torch.zeros_like(tmp.data).normal_()
-                    p.grad.data = (batch_grad[iter_grad].view(-1, size_param)/batch_size+noise_g/batch_size).view(p.grad.size())
+                    noise_g = beta*args.nm*SENSITIVITY*torch.zeros_like(tmp.data).normal_()
+                    p.grad.data = (batch_grad[iter_grad].view(-1, size_param)/args.batch_size+noise_g/args.batch_size).view(p.grad.size())
                     iter_grad=iter_grad+1
             
-                loss_value += loss
+                loss_value = loss / args.batch_size
             ### Laplacian_smoothing
             if sub_method[0]: 
                 model = Laplacian_smoothing(model)
@@ -364,20 +379,19 @@ def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, 
             loss = loss_function(output, target)
             loss.backward()
 
-            loss_value = loss.item() / batch_size
+            loss_value = loss.item() / args.batch_size
         optimizer.step()
-        scheduler.step()
-
-
+        
         ##model parameter pruning
         if sub_method[3]:
         #clip model weight by threshold, speed up compared to clip by rate
             model = model_pruning_relax(model, epoch)
 
-        if batch_idx % log_interval == 0:
+        if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss_value))
+
     ### cal train acc
     correct = 0
     train_loss = 0
@@ -410,8 +424,7 @@ def train(sub_method, model, device, train_loader, optimizer, scheduler, epoch, 
         100. * correct / len(train_loader.dataset)))
     return 100. * correct / len(train_loader.dataset)
 
-
-def test(model, device, test_loader, batch_size, loss_function, logger):
+def test(args, model, device, test_loader, loss_function, logger):
     model.eval()
     test_loss = 0
     correct = 0

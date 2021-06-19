@@ -58,7 +58,7 @@ def yeom_membership_attack(per_instance_loss, attack_y, train_loss, logger):
 
 
 
-def shokri_membership_inference_one_shadow_model(train_param, log_path):
+def shokri_membership_inference_one_shadow_model(args, sub_method, model_id, model_name, model_type, data_source, logger, log_path):
     print('--------------train shokri attack model-----------------------')
     '''
     ##train classifier for each class 
@@ -92,10 +92,9 @@ def shokri_membership_inference_one_shadow_model(train_param, log_path):
     prety_print_result(total_testLabel, total_pred_Label)
     print(roc_auc_score(total_testLabel, total_pred_Label))
     '''
-    model, model_dir = trainNN.train(train_param)
+    model, model_dir = trainNN.train(args, sub_method, model_id, model_name, model_type, data_source, logger)
     
 
-    data_source, logger = train_param[3], train_param[-2]
     train, trainLabel, test, testLabel = data_source
     #train
     pred_Label = model(torch.tensor(train.copy()).to(torch.device("cuda"))).detach().cpu() > 0.5
